@@ -1,157 +1,22 @@
+{% load static %}
 <!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Audio Transcription (Dev)</title>
-    <style>
-      body {
-        font-family: Arial, sans-serif;
-        max-width: 800px;
-        margin: 0 auto;
-        padding: 20px;
-        background-color: #f5f5f5;
-      }
-      .container {
-        background-color: white;
-        padding: 20px;
-        border-radius: 8px;
-        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-      }
-      .controls {
-        text-align: center;
-        margin-bottom: 20px;
-      }
-      button {
-        padding: 10px 20px;
-        font-size: 16px;
-        cursor: pointer;
-        border: none;
-        border-radius: 4px;
-        margin: 0 10px;
-      }
-      #startButton {
-        background-color: #4caf50;
-        color: white;
-      }
-      #stopButton {
-        background-color: #f44336;
-        color: white;
-        display: none;
-      }
-      .transcription {
-        margin-bottom: 20px;
-        padding: 15px;
-        background-color: #f8f9fa;
-        border-radius: 4px;
-      }
-      .timestamp {
-        color: #666;
-        font-size: 0.9em;
-        margin-bottom: 10px;
-      }
-      .language-info {
-        color: #666;
-        font-size: 0.9em;
-        margin-bottom: 10px;
-      }
-      .transcription-text {
-        line-height: 1.6;
-        margin-bottom: 10px;
-      }
-      .words {
-        line-height: 1.6;
-      }
-      .word {
-        display: inline;
-        padding: 2px 4px;
-        border-radius: 3px;
-        cursor: pointer;
-        margin-right: 2px;
-      }
-      .word[data-type="word"] {
-        background-color: #e3f2fd;
-      }
-      .word[data-type="audio_event"] {
-        background-color: #fff3e0;
-        font-style: italic;
-      }
-      .word-tooltip {
-        display: none;
-        position: absolute;
-        background: #333;
-        color: white;
-        padding: 5px;
-        border-radius: 3px;
-        font-size: 12px;
-        z-index: 100;
-      }
-      .no-transcription {
-        color: #999;
-        font-style: italic;
-      }
-      .session-controls {
-        background-color: #f8f9fa;
-        padding: 15px;
-        border-radius: 4px;
-        margin-bottom: 20px;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-      }
-      .session-selector {
-        width: 50%;
-      }
-      .session-selector select {
-        width: 100%;
-        padding: 8px;
-        border-radius: 4px;
-        border: 1px solid #ddd;
-      }
-      .new-session {
-        width: 45%;
-        display: flex;
-      }
-      .new-session input {
-        flex-grow: 1;
-        padding: 8px;
-        border-radius: 4px;
-        border: 1px solid #ddd;
-        margin-right: 10px;
-      }
-      .new-session button {
-        background-color: #2196F3;
-        color: white;
-        padding: 8px 15px;
-        margin: 0;
-      }
-      .session-info {
-        background-color: #e8f5e9;
-        padding: 10px;
-        border-radius: 4px;
-        margin-bottom: 20px;
-        text-align: center;
-      }
-      .disabled {
-        opacity: 0.6;
-        cursor: not-allowed;
-      }
-    </style>
+    <link rel="stylesheet" href="{% static 'css/style.css' %}">
   </head>
   <body>
-    <div class="container">
-      <h1>Audio Transcription (Development Mode)</h1>
-      <p style="text-align: center; color: #666">
-        Recording in 10-second chunks for testing
-      </p>
-
+    <header>
+      <h1>D&D Session Assistant</h1>
       <div class="session-controls">
         <div class="session-selector">
           <label for="sessionSelect">Select Session:</label>
           <select id="sessionSelect">
             <option value="">-- Select a session --</option>
             {% for session in sessions %}
-              <option value="{{ session.id }}" {% if active_session and active_session.id == session.id %}selected{% endif %}>
+              <option value="{{ session.id }}" {% if active_session_id_str and active_session_id_str == session.id %}selected{% endif %}>
                 {{ session.name }} ({{ session.created_at|date:"Y-m-d H:i:s" }})
               </option>
             {% endfor %}
@@ -167,38 +32,65 @@
       <div class="session-info">
         <h3>Active Session: {{ active_session.name }}</h3>
         <p>Created: {{ active_session.created_at|date:"Y-m-d H:i:s" }}</p>
-      </div>
-      {% endif %}
-
-      <div class="controls">
-        <button id="startButton" {% if not active_session %}class="disabled"{% endif %}>Start Recording</button>
-        <button id="stopButton">Stop Recording</button>
-      </div>
-
-      <div id="transcriptions">
-        {% for transcription in transcriptions %}
-        <div class="transcription">
-          <p class="timestamp">
-            Chunk {{ transcription.chunk_number }} - {{
-            transcription.created_at|date:"Y-m-d H:i:s" }}
-          </p>
-
-          {% if transcription.words_json %}
-          <p class="transcription-text">{{ transcription.full_text }}</p>
-          <div class="words">
-            {% for word in transcription.words_json %}<span
-              class="word"
-              data-type="{{ word.type }}"
-              data-start="{{ word.start }}"
-              data-end="{{ word.end }}"
-              >{{ word.text }}</span
-            >{% endfor %}
-          </div>
-          {% else %}
-          <p class="no-transcription">No transcription available</p>
-          {% endif %}
+        <div class="controls">
+          <div class="voice-indicator" id="voiceIndicator"></div>
+          <button id="startButton" {% if not active_session %}class="disabled"{% endif %}>Start Recording</button>
+          <button id="stopButton">Stop Recording</button>
+          <button id="forceInsightButton">Help / Force Insight</button>
         </div>
-        {% endfor %}
+      </div>
+      {% else %}
+       <p>Select or create a session to begin.</p>
+      {% endif %}
+    </header>
+
+    <div class="container">
+      <div class="main-content">
+        <div class="left-column">
+            <h2 class="column-header">Transcription</h2>
+            <div id="transcriptions">
+                {% if not active_session %}
+                <p class="no-transcription">Select an active session to view transcriptions.</p>
+                {% elif not transcriptions %}
+                <p class="no-transcription">Start recording to see transcriptions...</p>
+                {% else %}
+                    {% for transcription in transcriptions %}
+                    <div class="transcription">
+                    <div class="transcription-header">
+                        <p class="timestamp">Chunk {{ transcription.chunk_number }} - {{
+                        transcription.created_at|date:"Y-m-d H:i:s" }}
+                        </p>
+                        {% if transcription.generated_insight %}
+                            <span class="insight-icon" title="Toggle Insight">💡</span>
+                        {% endif %}
+                    </div>
+                    <p class="transcription-text">{{ transcription.text }}</p>
+                    {% if transcription.generated_insight %}
+                        <div class="insight-text hidden"><hr><strong>Insight:</strong><br>{{ transcription.generated_insight|linebreaksbr }}</div>
+                    {% endif %}
+                    {% if transcription.words_json %}
+                    <div class="words">
+                        {% for word in transcription.words_json %}<span
+                        class="word"
+                        data-type="{{ word.type }}"
+                        data-start="{{ word.start }}"
+                        data-end="{{ word.end }}"
+                        >{{ word.text }}</span
+                        >{% endfor %}
+                    </div>
+                    {% endif %}
+                    </div>
+                    {% endfor %}
+                {% endif %}
+            </div>
+        </div>
+        <div class="right-column">
+            <h2 class="column-header">AI Insights</h2>
+            <div id="insights" {% if not active_session %}style="display: none;"{% endif %}>
+                <div id="insightContent">{% if active_session %}Loading insights...{% else %}No active session.{% endif %}</div>
+                <span id="insightTimestamp"></span>
+            </div>
+        </div>
       </div>
     </div>
 
@@ -212,14 +104,17 @@
       const sessionSelect = document.getElementById("sessionSelect");
       const newSessionName = document.getElementById("newSessionName");
       const createSessionButton = document.getElementById("createSessionButton");
+      const insightsDiv = document.getElementById("insights");
+      const insightContentDiv = document.getElementById("insightContent");
+      const insightTimestampSpan = document.getElementById("insightTimestamp");
+      const forceInsightButton = document.getElementById("forceInsightButton");
+      const voiceIndicator = document.getElementById("voiceIndicator");
       
       let activeSessionId = "{{ active_session.id|default:'null' }}";
+      let lastTranscriptionChunk = -1; // Initialize variable to track the last seen chunk number
       // Convert string 'null' to actual null
       if (activeSessionId === 'null') {
         activeSessionId = null;
-      } else {
-        // Convert string ID to number
-        activeSessionId = parseInt(activeSessionId);
       }
 
       // Redirect to selected session
@@ -277,104 +172,282 @@
         }
       });
 
+      // Polling interval (in milliseconds)
+      const POLLING_INTERVAL = 5000; // Check every 5 seconds
+      let transcriptionPollingInterval = null;
+      let insightPollingInterval = null;
+      let isRecording = false;
+
+      // Start recording
       startButton.addEventListener("click", async () => {
-        if (!activeSessionId) {
-          alert("Please select or create a session first");
-          return;
-        }
-        
+        if (!activeSessionId || startButton.classList.contains('disabled')) return;
+
         try {
           const response = await fetch("/toggle-recording/", {
             method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ 
-              action: "start",
-              session_id: activeSessionId
-            }),
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "start", session_id: activeSessionId }),
           });
 
           if (response.ok) {
-            startButton.style.display = "none";
-            stopButton.style.display = "inline-block";
+            const data = await response.json();
+            if (data.status === "started") {
+              startButton.style.display = "none";
+              stopButton.style.display = "inline-block";
+              isRecording = true;
+              forceInsightButton.style.display = "inline-block";
+              voiceIndicator.classList.add('active');
+              startPolling(); // Start polling when recording starts
+              fetchLatestInsight(); // Fetch initial insight
+              insightsDiv.style.display = 'block'; // Show insight section
+            }
           }
         } catch (error) {
-          console.error("Error:", error);
+          console.error("Error starting recording:", error);
         }
       });
 
+      // Stop recording
       stopButton.addEventListener("click", async () => {
+        if (!activeSessionId) return;
+
         try {
           const response = await fetch("/toggle-recording/", {
             method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ 
-              action: "stop",
-              session_id: activeSessionId
-            }),
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "stop", session_id: activeSessionId }),
           });
 
           if (response.ok) {
-            stopButton.style.display = "none";
-            startButton.style.display = "inline-block";
+            const data = await response.json();
+            if (data.status === "stopped") {
+              startButton.style.display = "inline-block";
+              stopButton.style.display = "none";
+              isRecording = false;
+              forceInsightButton.style.display = "none";
+              voiceIndicator.classList.remove('active');
+              stopPolling(); // Stop polling when recording stops
+            }
           }
         } catch (error) {
-          console.error("Error:", error);
+          console.error("Error stopping recording:", error);
         }
       });
 
-      // Function to update transcriptions
-      async function updateTranscriptions() {
+      // Fetch latest transcriptions
+      async function fetchLatestTranscriptions() {
         if (!activeSessionId) return;
-        
         try {
-          const response = await fetch(`/get-latest-transcriptions/?session_id=${activeSessionId}`);
+          // Pass the last seen chunk number to the backend
+          const response = await fetch(`/get-latest-transcriptions/?session_id=${activeSessionId}&last_chunk=${lastTranscriptionChunk}`);
           const data = await response.json();
-
-          transcriptionsDiv.innerHTML = data.transcriptions
-            .map(
-              (t) => `
-              <div class="transcription">
-                <p class="timestamp">Chunk ${t.chunk_number} - ${
-                t.created_at
-              }</p>
-                <p class="language-info">
-                  Language: ${t.language_code || "Auto-detect"}
-                  ${
-                    t.language_probability
-                      ? ` (${t.language_probability.toFixed(2)})`
-                      : ""
-                  }
-                </p>
-                <p class="transcription-text">${t.text}</p>
-                ${
-                  t.words
-                    ? `
-                  <div class="words">
-                    ${t.words
-                      .map(
-                        (word) =>
-                          `<span class="word" data-type="${word.type}" data-start="${word.start}" data-end="${word.end}">${word.text}</span>`
-                      )
-                      .join("")}
-                  </div>
-                `
-                    : '<p class="no-transcription">No transcription available</p>'
-                }
-              </div>
-            `
-            )
-            .join("");
+          updateTranscriptions(data.transcriptions);
         } catch (error) {
-          console.error("Error:", error);
+          console.error("Error fetching transcriptions:", error);
         }
       }
+      
+      // Fetch latest insight
+      async function fetchLatestInsight() {
+          if (!activeSessionId) return;
+          try {
+              const response = await fetch(`/get-latest-insight/?session_id=${activeSessionId}`);
+              if (response.ok) {
+                  const data = await response.json();
+                  updateInsight(data.insight);
+              } else {
+                  console.error("Error fetching insight:", response.statusText);
+                  // Optionally display an error message in the insight section
+                  // insightContentDiv.textContent = 'Error loading insight.';
+                  // insightTimestampSpan.textContent = '';
+              }
+          } catch (error) {
+              console.error("Error fetching insight:", error);
+          }
+      }
 
-      // Update transcriptions every 5 seconds
-      setInterval(updateTranscriptions, 5000);
+      // Function to scroll transcriptions to bottom
+      function scrollToBottom() {
+          transcriptionsDiv.scrollTop = transcriptionsDiv.scrollHeight;
+      }
+
+      // Update the transcriptions display
+      function updateTranscriptions(newTranscriptions) {
+        if (!activeSessionId) {
+            transcriptionsDiv.innerHTML = '<p class="no-transcription">Select an active session to view transcriptions.</p>';
+            lastTranscriptionChunk = -1;
+            return;
+        }
+
+        // Handle initial load or case where container is empty
+        const noTranscriptionMessage = transcriptionsDiv.querySelector('.no-transcription');
+        if (noTranscriptionMessage) {
+            noTranscriptionMessage.remove();
+        }
+        
+        if (newTranscriptions.length === 0 && transcriptionsDiv.children.length === 0) {
+             transcriptionsDiv.innerHTML = '<p class="no-transcription">No transcriptions yet for this session. Start recording.</p>';
+             lastTranscriptionChunk = -1;
+             return;
+        }
+
+        let maxChunk = lastTranscriptionChunk;
+        newTranscriptions.forEach((t) => {
+          // Basic check to prevent duplicates if polling overlaps slightly
+          if (t.chunk_number > lastTranscriptionChunk) {
+              const div = document.createElement("div");
+              div.className = "transcription";
+              div.dataset.chunkNumber = t.chunk_number; // Add data attribute
+              div.innerHTML = `
+                <div class="transcription-header">
+                    <p class="timestamp">Chunk ${t.chunk_number} - ${formatDate(t.created_at)}</p>
+                    ${t.generated_insight ? '<span class="insight-icon" title="Toggle Insight">💡</span>' : ''}
+                </div>
+                <p class="transcription-text">${t.text || "Processing..."}</p>
+                ${t.words ? renderWords(t.words) : ''}
+                ${t.generated_insight ? `<div class="insight-text hidden"><hr><strong>Insight:</strong><br>${formatInsightText(t.generated_insight)}</div>` : ''}
+              `;
+              // Append new transcription to the bottom
+              transcriptionsDiv.appendChild(div);
+              maxChunk = Math.max(maxChunk, t.chunk_number);
+          } else {
+              console.log("Skipping duplicate chunk:", t.chunk_number);
+          }
+        });
+
+        lastTranscriptionChunk = maxChunk; // Update the last seen chunk number
+        attachWordTooltips(); // Re-attach tooltips after updating DOM
+        scrollToBottom(); // Scroll to bottom after adding new content
+      }
+      
+      // Update the insight display
+      function updateInsight(insight) {
+          if (insight && insight.text) {
+              insightContentDiv.textContent = insight.text;
+              if (insight.timestamp) {
+                  insightTimestampSpan.textContent = `Generated: ${formatDate(insight.timestamp)}`;
+              } else {
+                  insightTimestampSpan.textContent = '';
+              }
+              insightsDiv.style.display = 'block'; // Ensure it's visible
+          } else {
+              // Keep showing loading or a default message if you prefer
+              // For now, just hide if no insight yet or clear it
+              // insightContentDiv.textContent = 'No insights generated yet.';
+              // insightTimestampSpan.textContent = ''; 
+              // insightsDiv.style.display = 'none'; // Optionally hide if empty
+          }
+      }
+
+      // Render words with tooltips
+      function renderWords(words) {
+        const wordsHtml = words.map(word => {
+          return `
+            <span class="word" data-type="${word.type}" data-start="${word.start}" data-end="${word.end}">${word.text}</span>`;
+        }).join('');
+        return wordsHtml;
+      }
+
+      // Utility function to format date
+      function formatDate(dateString) {
+          if (!dateString) return '';
+          const date = new Date(dateString);
+          return date.toLocaleString(); // Adjust formatting as needed
+      }
+
+      // Start polling for updates
+      function startPolling() {
+        stopPolling(); // Clear existing intervals just in case
+        // Fetch immediately first time
+        fetchLatestTranscriptions();
+        fetchLatestInsight(); 
+        transcriptionPollingInterval = setInterval(fetchLatestTranscriptions, POLLING_INTERVAL);
+        insightPollingInterval = setInterval(fetchLatestInsight, POLLING_INTERVAL); // Poll insights too
+      }
+
+      // Stop polling
+      function stopPolling() {
+        if (transcriptionPollingInterval) {
+          clearInterval(transcriptionPollingInterval);
+          transcriptionPollingInterval = null;
+        }
+        if (insightPollingInterval) {
+          clearInterval(insightPollingInterval);
+          insightPollingInterval = null;
+        }
+      }
+      
+      // Modify initialize function to fetch initial data and scroll
+      function initialize() {
+        if (!activeSessionId) {
+          startButton.classList.add('disabled');
+        } else {
+            startButton.classList.remove('disabled');
+            fetchLatestTranscriptions(); 
+            fetchLatestInsight(); 
+        }
+        attachWordTooltips();
+        // Initial scroll after loading existing transcriptions
+        setTimeout(scrollToBottom, 100); 
+        
+        // Add event listener for insight icons (using event delegation)
+        transcriptionsDiv.addEventListener('click', function(event) {
+            if (event.target.classList.contains('insight-icon')) {
+                const insightTextDiv = event.target.closest('.transcription').querySelector('.insight-text');
+                if (insightTextDiv) {
+                    insightTextDiv.classList.toggle('hidden');
+                }
+            }
+        });
+      }
+
+      initialize();
+
+      // Force insight generation
+      forceInsightButton.addEventListener("click", async () => {
+          if (!activeSessionId || !isRecording || forceInsightButton.classList.contains('loading')) return;
+
+          forceInsightButton.classList.add('loading');
+          forceInsightButton.disabled = true;
+
+          try {
+              const response = await fetch("/force-insight/", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ session_id: activeSessionId }),
+              });
+
+              if (response.ok) {
+                  const data = await response.json();
+                  if (data.status === "summary_force_requested") {
+                      console.log("Force insight request sent.");
+                      // Optional: Give user feedback, e.g., disable button briefly
+                  } else {
+                      console.error("Error requesting forced insight:", data.message);
+                      alert(`Error: ${data.message}`);
+                  }
+              } else {
+                  console.error("Error requesting forced insight:", response.statusText);
+                  alert(`Error: ${response.statusText}`);
+              }
+          } catch (error) {
+              console.error("Error requesting forced insight:", error);
+              alert(`Error: ${error}`);
+          } finally {
+              setTimeout(() => {
+                  forceInsightButton.classList.remove('loading');
+                  forceInsightButton.disabled = false;
+              }, 300); 
+          }
+      });
+
+      // Function to safely format insight text for HTML display
+      function formatInsightText(text) {
+          if (!text) return '';
+          // Basic escaping, consider a more robust library if complex HTML is possible
+          return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
+      }
+
     </script>
   </body>
 </html>

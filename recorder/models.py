@@ -1,10 +1,14 @@
 from django.db import models
+import uuid
 
 # Create your models here.
 
 class RecordingSession(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255)
     created_at = models.DateTimeField(auto_now_add=True)
+    latest_insight_text = models.TextField(null=True, blank=True)
+    latest_insight_timestamp = models.DateTimeField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
     
     class Meta:
@@ -18,15 +22,16 @@ class Transcription(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     text = models.TextField()
     chunk_number = models.IntegerField()
-    language_code = models.CharField(max_length=10, null=True)
-    language_probability = models.FloatField(null=True)
-    words_json = models.JSONField(null=True)  # Store the detailed word information
+    language_code = models.CharField(max_length=10, null=True, blank=True)
+    language_probability = models.FloatField(null=True, blank=True)
+    words_json = models.JSONField(null=True, blank=True)  # Store the detailed word information
+    generated_insight_text = models.TextField(null=True, blank=True) # Insight generated after this chunk
     
     class Meta:
         ordering = ['-created_at']
     
     def __str__(self):
-        return f"Chunk {self.chunk_number} - {self.created_at.strftime('%Y-%m-%d %H:%M:%S')}"
+        return f"Session {self.session.name} - Chunk {self.chunk_number}"
     
     @property
     def full_text(self):

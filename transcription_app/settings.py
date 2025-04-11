@@ -24,10 +24,17 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/5.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-your-secret-key-here'
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY")
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+# Convert DEBUG env var string to boolean
+DEBUG = os.getenv("DEBUG", "False").lower() in ('true', '1', 't')
+
+# Transcription Model Setting
+TRANSCRIPTION_MODEL = os.getenv("TRANSCRIPTION_MODEL", "elevenlabs").lower() # Default to elevenlabs
+if TRANSCRIPTION_MODEL not in ['elevenlabs', 'openai']:
+    print(f"Warning: Invalid TRANSCRIPTION_MODEL '{TRANSCRIPTION_MODEL}'. Defaulting to 'elevenlabs'.")
+    TRANSCRIPTION_MODEL = 'elevenlabs'
 
 ALLOWED_HOSTS = []
 
@@ -121,8 +128,13 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.0/howto/static-files/
 
 STATIC_URL = "static/"
+
+# Add this line to specify the directory where collectstatic will gather static files.
+STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
+
+# Add this list to tell Django where to find static files in your apps/project.
 STATICFILES_DIRS = [
-    os.path.join(BASE_DIR, 'static'),
+    os.path.join(BASE_DIR, "static"),
 ]
 
 # Default primary key field type
