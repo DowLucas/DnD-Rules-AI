@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Audio Transcription (Dev)</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 800px;
+        margin: 0 auto;
+        padding: 20px;
+        background-color: #f5f5f5;
+      }
+      .container {
+        background-color: white;
+        padding: 20px;
+        border-radius: 8px;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+      }
+      .controls {
+        text-align: center;
+        margin-bottom: 20px;
+      }
+      button {
+        padding: 10px 20px;
+        font-size: 16px;
+        cursor: pointer;
+        border: none;
+        border-radius: 4px;
+        margin: 0 10px;
+      }
+      #startButton {
+        background-color: #4caf50;
+        color: white;
+      }
+      #stopButton {
+        background-color: #f44336;
+        color: white;
+        display: none;
+      }
+      .transcription {
+        margin-bottom: 20px;
+        padding: 15px;
+        background-color: #f8f9fa;
+        border-radius: 4px;
+      }
+      .timestamp {
+        color: #666;
+        font-size: 0.9em;
+        margin-bottom: 10px;
+      }
+      .language-info {
+        color: #666;
+        font-size: 0.9em;
+        margin-bottom: 10px;
+      }
+      .transcription-text {
+        line-height: 1.6;
+        margin-bottom: 10px;
+      }
+      .words {
+        line-height: 1.6;
+      }
+      .word {
+        display: inline;
+        padding: 2px 4px;
+        border-radius: 3px;
+        cursor: pointer;
+        margin-right: 2px;
+      }
+      .word[data-type="word"] {
+        background-color: #e3f2fd;
+      }
+      .word[data-type="audio_event"] {
+        background-color: #fff3e0;
+        font-style: italic;
+      }
+      .word-tooltip {
+        display: none;
+        position: absolute;
+        background: #333;
+        color: white;
+        padding: 5px;
+        border-radius: 3px;
+        font-size: 12px;
+        z-index: 100;
+      }
+      .no-transcription {
+        color: #999;
+        font-style: italic;
+      }
+      .session-controls {
+        background-color: #f8f9fa;
+        padding: 15px;
+        border-radius: 4px;
+        margin-bottom: 20px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .session-selector {
+        width: 50%;
+      }
+      .session-selector select {
+        width: 100%;
+        padding: 8px;
+        border-radius: 4px;
+        border: 1px solid #ddd;
+      }
+      .new-session {
+        width: 45%;
+        display: flex;
+      }
+      .new-session input {
+        flex-grow: 1;
+        padding: 8px;
+        border-radius: 4px;
+        border: 1px solid #ddd;
+        margin-right: 10px;
+      }
+      .new-session button {
+        background-color: #2196F3;
+        color: white;
+        padding: 8px 15px;
+        margin: 0;
+      }
+      .session-info {
+        background-color: #e8f5e9;
+        padding: 10px;
+        border-radius: 4px;
+        margin-bottom: 20px;
+        text-align: center;
+      }
+      .disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Audio Transcription (Development Mode)</h1>
+      <p style="text-align: center; color: #666">
+        Recording in 10-second chunks for testing
+      </p>
+
+      <div class="session-controls">
+        <div class="session-selector">
+          <label for="sessionSelect">Select Session:</label>
+          <select id="sessionSelect">
+            <option value="">-- Select a session --</option>
+            {% for session in sessions %}
+              <option value="{{ session.id }}" {% if active_session and active_session.id == session.id %}selected{% endif %}>
+                {{ session.name }} ({{ session.created_at|date:"Y-m-d H:i:s" }})
+              </option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="new-session">
+          <input type="text" id="newSessionName" placeholder="New session name">
+          <button id="createSessionButton">Create</button>
+        </div>
+      </div>
+
+      {% if active_session %}
+      <div class="session-info">
+        <h3>Active Session: {{ active_session.name }}</h3>
+        <p>Created: {{ active_session.created_at|date:"Y-m-d H:i:s" }}</p>
+      </div>
+      {% endif %}
+
+      <div class="controls">
+        <button id="startButton" {% if not active_session %}class="disabled"{% endif %}>Start Recording</button>
+        <button id="stopButton">Stop Recording</button>
+      </div>
+
+      <div id="transcriptions">
+        {% for transcription in transcriptions %}
+        <div class="transcription">
+          <p class="timestamp">
+            Chunk {{ transcription.chunk_number }} - {{
+            transcription.created_at|date:"Y-m-d H:i:s" }}
+          </p>
+
+          {% if transcription.words_json %}
+          <p class="transcription-text">{{ transcription.full_text }}</p>
+          <div class="words">
+            {% for word in transcription.words_json %}<span
+              class="word"
+              data-type="{{ word.type }}"
+              data-start="{{ word.start }}"
+              data-end="{{ word.end }}"
+              >{{ word.text }}</span
+            >{% endfor %}
+          </div>
+          {% else %}
+          <p class="no-transcription">No transcription available</p>
+          {% endif %}
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="word-tooltip" id="wordTooltip"></div>
+
+    <script>
+      const startButton = document.getElementById("startButton");
+      const stopButton = document.getElementById("stopButton");
+      const transcriptionsDiv = document.getElementById("transcriptions");
+      const wordTooltip = document.getElementById("wordTooltip");
+      const sessionSelect = document.getElementById("sessionSelect");
+      const newSessionName = document.getElementById("newSessionName");
+      const createSessionButton = document.getElementById("createSessionButton");
+      
+      let activeSessionId = "{{ active_session.id|default:'null' }}";
+      // Convert string 'null' to actual null
+      if (activeSessionId === 'null') {
+        activeSessionId = null;
+      } else {
+        // Convert string ID to number
+        activeSessionId = parseInt(activeSessionId);
+      }
+
+      // Redirect to selected session
+      sessionSelect.addEventListener("change", function() {
+        if (this.value) {
+          window.location.href = `/?session_id=${this.value}`;
+        } else {
+          window.location.href = "/";
+        }
+      });
+
+      // Create new session
+      createSessionButton.addEventListener("click", async () => {
+        const sessionName = newSessionName.value.trim() || `Session ${new Date().toISOString()}`;
+        
+        try {
+          const response = await fetch("/create-session/", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ name: sessionName }),
+          });
+
+          if (response.ok) {
+            const data = await response.json();
+            if (data.status === "success") {
+              // Redirect to the new session
+              window.location.href = `/?session_id=${data.session.id}`;
+            }
+          }
+        } catch (error) {
+          console.error("Error creating session:", error);
+        }
+      });
+
+      // Word tooltip functionality
+      document.addEventListener("mouseover", function (e) {
+        if (e.target.classList.contains("word")) {
+          const word = e.target;
+          const start = parseFloat(word.dataset.start).toFixed(2);
+          const end = parseFloat(word.dataset.end).toFixed(2);
+          const type = word.dataset.type;
+
+          wordTooltip.innerHTML = `Type: ${type}<br>Start: ${start}s<br>End: ${end}s`;
+          wordTooltip.style.display = "block";
+          wordTooltip.style.left = e.pageX + 10 + "px";
+          wordTooltip.style.top = e.pageY + 10 + "px";
+        }
+      });
+
+      document.addEventListener("mouseout", function (e) {
+        if (e.target.classList.contains("word")) {
+          wordTooltip.style.display = "none";
+        }
+      });
+
+      startButton.addEventListener("click", async () => {
+        if (!activeSessionId) {
+          alert("Please select or create a session first");
+          return;
+        }
+        
+        try {
+          const response = await fetch("/toggle-recording/", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ 
+              action: "start",
+              session_id: activeSessionId
+            }),
+          });
+
+          if (response.ok) {
+            startButton.style.display = "none";
+            stopButton.style.display = "inline-block";
+          }
+        } catch (error) {
+          console.error("Error:", error);
+        }
+      });
+
+      stopButton.addEventListener("click", async () => {
+        try {
+          const response = await fetch("/toggle-recording/", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ 
+              action: "stop",
+              session_id: activeSessionId
+            }),
+          });
+
+          if (response.ok) {
+            stopButton.style.display = "none";
+            startButton.style.display = "inline-block";
+          }
+        } catch (error) {
+          console.error("Error:", error);
+        }
+      });
+
+      // Function to update transcriptions
+      async function updateTranscriptions() {
+        if (!activeSessionId) return;
+        
+        try {
+          const response = await fetch(`/get-latest-transcriptions/?session_id=${activeSessionId}`);
+          const data = await response.json();
+
+          transcriptionsDiv.innerHTML = data.transcriptions
+            .map(
+              (t) => `
+              <div class="transcription">
+                <p class="timestamp">Chunk ${t.chunk_number} - ${
+                t.created_at
+              }</p>
+                <p class="language-info">
+                  Language: ${t.language_code || "Auto-detect"}
+                  ${
+                    t.language_probability
+                      ? ` (${t.language_probability.toFixed(2)})`
+                      : ""
+                  }
+                </p>
+                <p class="transcription-text">${t.text}</p>
+                ${
+                  t.words
+                    ? `
+                  <div class="words">
+                    ${t.words
+                      .map(
+                        (word) =>
+                          `<span class="word" data-type="${word.type}" data-start="${word.start}" data-end="${word.end}">${word.text}</span>`
+                      )
+                      .join("")}
+                  </div>
+                `
+                    : '<p class="no-transcription">No transcription available</p>'
+                }
+              </div>
+            `
+            )
+            .join("");
+        } catch (error) {
+          console.error("Error:", error);
+        }
+      }
+
+      // Update transcriptions every 5 seconds
+      setInterval(updateTranscriptions, 5000);
+    </script>
+  </body>
+</html>
