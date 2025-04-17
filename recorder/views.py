@@ -1,40 +1,47 @@
 import json
-from django.shortcuts import render, redirect
-from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
-from django.conf import settings
-from .models import Transcription, RecordingSession
-import sounddevice as sd
-import scipy.io.wavfile as wav
-import numpy as np
-import tempfile
 import os
-from elevenlabs import ElevenLabs
-from threading import Thread
+import tempfile
 import time
-from agents import Agent, Runner, WebSearchTool, FileSearchTool
-import getpass
 import asyncio
+from threading import Thread
 from django.utils import timezone
+from django.conf import settings
+from django.http import JsonResponse
+from rest_framework import viewsets, status
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+from elevenlabs import ElevenLabs
 from openai import OpenAI
+from agents import Agent, Runner, WebSearchTool, FileSearchTool
+
+# Import pydub for audio conversion
+try:
+    from pydub import AudioSegment
+    ffmpeg_check = True
+    # Basic check if ffmpeg might be available (pydub will raise specific error if not)
+    if os.system('ffmpeg -version > /dev/null 2>&1') != 0:
+         print("WARNING: ffmpeg command not found. Audio conversion might fail. Please install ffmpeg.")
+except ImportError:
+    print("WARNING: pydub not installed. Audio conversion will be skipped. Run: pip install pydub")
+    AudioSegment = None
+    ffmpeg_check = False
+
+from .models import Transcription, RecordingSession
+from .serializers import TranscriptionSerializer, RecordingSessionSerializer
 
 if not os.environ.get("OPENAI_API_KEY"):
-  print("OPENAI_API_KEY is not set")
-  exit()
+    print("OPENAI_API_KEY is not set")
+    exit()
 
-# Global variables for recording state
-is_recording = False
-current_chunk = 0
-CHUNK_DURATION = 10  # 10 seconds for development
-SAMPLE_RATE = 44100
-last_summary_time = 0
-SUMMARY_INTERVAL = 20  # 30 seconds between summaries
-current_session = None
-force_summary_request = False # Flag to force summary generation
+# Global variables - Removed recording state vars
+current_session = None # Kept for insight generation context
+SUMMARY_INTERVAL = 20 # Interval still relevant for automated insights
+last_summary_time = 0 # Keep track of summary timing
 
 def get_summary_agent():
     return Agent(
-        name="DND Rules Assistant", 
+        name="DND Rules Assistant",
         instructions=(
             "You are a concise D&D 5e rules assistant."
         ),
@@ -44,22 +51,32 @@ def get_summary_agent():
         ]
     )
 
+# is_forced is now only triggered by the dedicated force_insight endpoint
 def summarize_latest_transcriptions(triggering_transcription_id, is_forced=False):
-    if not current_session:
+    # Find the session associated with the triggering transcription
+    try:
+        triggering_transcription = Transcription.objects.get(id=triggering_transcription_id)
+        session_for_summary = triggering_transcription.session
+    except Transcription.DoesNotExist:
+        print(f"Error: Triggering transcription ID {triggering_transcription_id} not found for summary.")
         return None
-    
-    # Get the 6 most recent transcriptions for the current session
-    latest_transcriptions = Transcription.objects.filter(session=current_session).order_by('-created_at')[:6]
-    
+
+    if not session_for_summary:
+         print(f"Error: Transcription {triggering_transcription_id} has no associated session.")
+         return None
+
+    # Get the 6 most recent transcriptions for the relevant session
+    latest_transcriptions = Transcription.objects.filter(session=session_for_summary).order_by('-created_at')[:6]
+
     if not latest_transcriptions:
         return None
-        
+
     # Combine the transcriptions into a single text
     combined_text = "\n".join([
         f"Chunk {t.chunk_number}: {t.text}"
         for t in latest_transcriptions
     ])
-    
+
     # Create the summary agent and run it
     agent = get_summary_agent()
 
@@ -85,301 +102,243 @@ def summarize_latest_transcriptions(triggering_transcription_id, is_forced=False
         )
         print("--- Regular Insight Prompt ---")
 
-    
     print(prompt)
 
     # Set up a new event loop for this thread
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    
+
     try:
         # Run the agent synchronously
         result = Runner.run_sync(agent, prompt)
         # Save the insight to the session
-        if result.final_output and current_session:
+        if result.final_output and session_for_summary:
             # Save to current session for live view
-            current_session.latest_insight_text = result.final_output
-            current_session.latest_insight_timestamp = timezone.now()
-            current_session.save()
+            session_for_summary.latest_insight_text = result.final_output
+            session_for_summary.latest_insight_timestamp = timezone.now()
+            session_for_summary.save()
 
             # Also save to the specific transcription that triggered this
-            try:
-                triggering_transcription = Transcription.objects.get(id=triggering_transcription_id)
-                # Avoid saving "No Insight right now" to historical chunks unless forced
-                if result.final_output != "No Insight right now" or is_forced:
-                    triggering_transcription.generated_insight_text = result.final_output
-                    triggering_transcription.save()
-            except Transcription.DoesNotExist:
-                print(f"Warning: Triggering transcription ID {triggering_transcription_id} not found.")
+            # Avoid saving "No Insight right now" to historical chunks unless forced
+            if result.final_output != "No Insight right now" or is_forced:
+                triggering_transcription.generated_insight_text = result.final_output
+                triggering_transcription.save()
+            else:
+                print("Skipping update of transcription insight for 'No Insight right now'.")
 
         return result.final_output
+    except Exception as e:
+        print(f"Error running summary agent: {e}")
+        return None # Ensure None is returned on agent error
     finally:
         # Clean up the loop
         loop.close()
 
-def start_recording():
-    global is_recording, current_chunk, last_summary_time, current_session, force_summary_request
-    
-    if not current_session:
-        return
-        
-    while is_recording:
-        # Create a temporary file for the audio chunk
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
-            # Record audio for the specified duration
-            audio_data = sd.rec(int(CHUNK_DURATION * SAMPLE_RATE),
-                              samplerate=SAMPLE_RATE,
-                              channels=1,
-                              dtype=np.int16)
-            sd.wait()
-            
-            # Save the audio to the temporary file
-            wav.write(temp_file.name, SAMPLE_RATE, audio_data)
-            
-            transcription_text = ""
-            language_code = None
-            language_probability = None
-            words_json = None
 
-            try:
-                # Choose transcription client based on settings
-                if settings.TRANSCRIPTION_MODEL == 'openai':
-                    print("Using OpenAI Whisper for transcription...")
-                    openai_client = OpenAI()
-                    with open(temp_file.name, 'rb') as audio_file:
-                        # Note: OpenAI Whisper API might not return word-level details like ElevenLabs
-                        # Adjust data saving accordingly.
-                        # Using transcribe with response_format="verbose_json" might give segments.
-                        response = openai_client.audio.transcriptions.create(
-                            model="whisper-1", 
-                            file=audio_file,
-                            response_format="verbose_json" # Request verbose json for more details
-                        )
-                        transcription_text = response.text
-                        language_code = response.language 
-                        # OpenAI doesn't provide probability or word-level details directly in this basic response
-                        # We can potentially extract word timestamps if needed from segments if available
-                        words_json = [{
-                            'text': segment.get('text', '').strip(),
-                            'start': segment.get('start'),
-                            'end': segment.get('end'),
-                            'type': 'word', # Approximate as word segment
-                            'speaker_id': None # Not provided by Whisper
-                        } for segment in response.segments] if hasattr(response, 'segments') else None
+# Removed start_recording function
 
-                elif settings.TRANSCRIPTION_MODEL == 'elevenlabs':
-                    print("Using ElevenLabs for transcription...")
-                    elevenlabs_client = ElevenLabs(api_key=settings.ELEVENLABS_API_KEY)
-                    with open(temp_file.name, 'rb') as audio_file:
-                        response = elevenlabs_client.speech_to_text.convert(
-                            file=audio_file,
-                            model_id="scribe_v1",
-                            tag_audio_events=True
-                        )
-                        transcription_text = response.text
-                        language_code = response.language_code
-                        language_probability = response.language_probability
-                        words_json = [{
-                            'text': word.text,
-                            'start': word.start,
-                            'end': word.end,
-                            'type': word.type,
-                            'speaker_id': word.speaker_id
-                        } for word in response.words] if response.words else None
-                else:
-                    # Should not happen due to settings validation, but good practice
-                    raise ValueError(f"Unsupported transcription model: {settings.TRANSCRIPTION_MODEL}")
 
-                # Save transcription to database
-                new_transcription = Transcription.objects.create(
-                    session=current_session,
-                    text=transcription_text,
-                    chunk_number=current_chunk,
-                    language_code=language_code,
-                    language_probability=language_probability,
-                    words_json=words_json
-                )
-                current_chunk += 1
-                triggering_transcription_id = new_transcription.id # Get the ID of the new chunk
-                
-                # Check if it's time for a summary (regular interval)
-                current_time = time.time()
-                if not force_summary_request and (current_time - last_summary_time >= SUMMARY_INTERVAL):
-                    try:
-                        # Pass the ID of the transcription that potentially triggers the summary
-                        summary = summarize_latest_transcriptions(triggering_transcription_id, is_forced=False)
-                        if summary:
-                            print(f"\nGenerated insight for session {current_session.name}\n")
-                        last_summary_time = current_time
-                    except Exception as e:
-                        print(f"Error generating summary: {str(e)}")
-                
-            except Exception as e:
-                print(f"Error during transcription or saving: {str(e)}")
-            
-            # Clean up temporary file
-            os.unlink(temp_file.name)
+# API Viewsets
+class RecordingSessionViewSet(viewsets.ModelViewSet):
+    queryset = RecordingSession.objects.all()
+    serializer_class = RecordingSessionSerializer
+    parser_classes = (MultiPartParser, FormParser, JSONParser)
 
-        # Check if a summary was forced after the loop finishes recording a chunk
-        if force_summary_request and is_recording: # Check is_recording again in case it stopped EXACTLY as chunk finished
-            try:
-                print("Processing forced insight request...")
-                 # We need the ID of the chunk that just finished. 
-                 # Assuming the transcription was successfully created above, its ID is in triggering_transcription_id.
-                if 'triggering_transcription_id' in locals(): 
-                    summary = summarize_latest_transcriptions(triggering_transcription_id, is_forced=True)
-                    if summary:
-                        print(f"\nForced insight generated for session {current_session.name}\n")
-                    last_summary_time = time.time() # Reset timer after forced summary
-                else:
-                    print("Warning: Cannot generate forced insight, triggering transcription ID not found.")
-            except Exception as e:
-                print(f"Error generating forced summary: {str(e)}")
-            finally:
-                force_summary_request = False # Reset the flag
+    # Removed toggle_recording action - Recording is handled by frontend
 
-def index(request):
-    sessions = RecordingSession.objects.all()
-    active_session = None
-    transcriptions = []
-    
-    # If a session is selected, get its transcriptions
-    if 'session_id' in request.GET:
+    @action(detail=True, methods=['post'])
+    def upload_chunk(self, request, pk=None):
+        global last_summary_time # Need to update this
+        session = self.get_object()
+
+        # Get uploaded file - assumes frontend sends it with name 'audio_chunk'
+        if 'audio_chunk' not in request.FILES:
+            return Response({'error': 'No audio chunk file found in request'}, status=status.HTTP_400_BAD_REQUEST)
+
+        audio_file = request.FILES['audio_chunk']
+
+        # Determine the next chunk number sequentially for this session
+        last_chunk = Transcription.objects.filter(session=session).order_by('-chunk_number').first()
+        current_chunk_number = (last_chunk.chunk_number + 1) if last_chunk else 0
+
+        # Save the uploaded chunk temporarily (use original extension if possible)
+        original_filename = audio_file.name
+        _, original_ext = os.path.splitext(original_filename)
+        if not original_ext: # Default to .webm if no extension found
+            original_ext = '.webm'
+
+        temp_file_path = None
+        converted_file_path = None
+
         try:
-            session_id = request.GET['session_id']
-            active_session = RecordingSession.objects.get(id=session_id)
-            # Fetch ALL transcriptions for the session, ordered oldest first
-            transcriptions = Transcription.objects.filter(session=active_session).order_by('created_at') 
-        except (ValueError, RecordingSession.DoesNotExist):
-            # ValueError might still occur if the session_id is not a valid UUID format
-            # RecordingSession.DoesNotExist handles valid UUIDs not found
-            pass # Add pass back to fix indentation error
-    
-    active_session_id_str = str(active_session.id) if active_session else None
+            # Save the original uploaded file
+            with tempfile.NamedTemporaryFile(suffix=original_ext, delete=False) as temp_file:
+                for chunk_content in audio_file.chunks():
+                    temp_file.write(chunk_content)
+                temp_file_path = temp_file.name
+                print(f"Saved original chunk {current_chunk_number} to {temp_file_path}")
 
-    return render(request, 'recorder/index.html', {
-        'sessions': sessions,
-        'active_session': active_session,
-        'active_session_id_str': active_session_id_str,
-        'transcriptions': transcriptions
-    })
+            # Attempt conversion to WAV if pydub is available
+            if AudioSegment and ffmpeg_check:
+                print(f"Attempting to convert {temp_file_path} to WAV...")
+                try:
+                    audio = AudioSegment.from_file(temp_file_path) # Let pydub detect format
+                    # Create a new temporary file for the WAV version
+                    with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as converted_file:
+                        audio.export(converted_file.name, format="wav")
+                        converted_file_path = converted_file.name
+                    print(f"Successfully converted chunk {current_chunk_number} to {converted_file_path}")
+                    # Use the converted file path for transcription
+                    transcription_input_path = converted_file_path
+                except Exception as conversion_error:
+                    print(f"WARNING: Failed to convert {temp_file_path} to WAV: {conversion_error}. Attempting transcription with original file.")
+                    # Fallback to original file if conversion fails
+                    transcription_input_path = temp_file_path
+            else:
+                print(f"Skipping audio conversion for chunk {current_chunk_number}. Using original file: {temp_file_path}")
+                transcription_input_path = temp_file_path
 
-@csrf_exempt
-def create_session(request):
-    if request.method == 'POST':
-        data = json.loads(request.body)
-        session_name = data.get('name', f"Session {RecordingSession.objects.count() + 1}")
-        
-        # Create a new session
-        session = RecordingSession.objects.create(name=session_name)
-        
-        return JsonResponse({
-            'status': 'success',
-            'session': {
-                'id': session.id,
-                'name': session.name,
-                'created_at': session.created_at.strftime('%Y-%m-%d %H:%M:%S')
-            }
-        })
-    
-    return JsonResponse({'status': 'error', 'message': 'Invalid request method'})
+            # --- Transcription Logic --- (Now uses transcription_input_path)
+            if settings.TRANSCRIPTION_MODEL == 'openai':
+                print(f"Using OpenAI Whisper ({transcription_input_path}) for chunk {current_chunk_number}...")
+                openai_client = OpenAI()
+                with open(transcription_input_path, 'rb') as audio_input:
+                    response = openai_client.audio.transcriptions.create(
+                        model="whisper-1",
+                        file=audio_input,
+                        response_format="verbose_json"
+                    )
+                    transcription_text = response.text
+                    language_code = response.language
+                    words_json = [{
+                        'text': segment.get('text', '').strip(),
+                        'start': segment.get('start'),
+                        'end': segment.get('end'),
+                        'type': 'word',
+                        'speaker_id': None
+                    } for segment in response.segments] if hasattr(response, 'segments') else None
 
-@csrf_exempt
-def toggle_recording(request):
-    global is_recording, current_chunk, current_session
-    
-    if request.method == 'POST':
-        data = json.loads(request.body)
-        action = data.get('action')
-        session_id = data.get('session_id')
-        
-        # Validate session
-        try:
-            current_session = RecordingSession.objects.get(id=session_id)
-        except RecordingSession.DoesNotExist:
-            return JsonResponse({'status': 'error', 'message': 'Invalid session'})
-        
-        # Reset chunk counter for the session
-        if action == 'start' and not is_recording:
-            # Get the highest chunk number for this session
-            highest_chunk = Transcription.objects.filter(session=current_session).order_by('-chunk_number').first()
-            current_chunk = (highest_chunk.chunk_number + 1) if highest_chunk else 0
-            
-            is_recording = True
-            # Start recording in a separate thread
-            recording_thread = Thread(target=start_recording)
-            recording_thread.start()
-            return JsonResponse({'status': 'started'})
-            
-        elif action == 'stop' and is_recording:
-            is_recording = False
-            return JsonResponse({'status': 'stopped'})
-    
-    return JsonResponse({'status': 'error', 'message': 'Invalid request'})
+            elif settings.TRANSCRIPTION_MODEL == 'elevenlabs':
+                print(f"Using ElevenLabs ({transcription_input_path}) for chunk {current_chunk_number}...")
+                elevenlabs_client = ElevenLabs(api_key=settings.ELEVENLABS_API_KEY)
+                with open(transcription_input_path, 'rb') as audio_input:
+                    response = elevenlabs_client.speech_to_text.convert(
+                        file=audio_input,
+                        model_id="scribe_v1",
+                        tag_audio_events=True
+                    )
+                    transcription_text = response.text
+                    language_code = response.language_code
+                    language_probability = response.language_probability
+                    words_json = [{
+                        'text': word.text,
+                        'start': word.start,
+                        'end': word.end,
+                        'type': word.type,
+                        'speaker_id': word.speaker_id
+                    } for word in response.words] if response.words else None
+            else:
+                raise ValueError(f"Unsupported transcription model: {settings.TRANSCRIPTION_MODEL}")
 
-def get_latest_transcriptions(request):
-    session_id = request.GET.get('session_id')
-    last_chunk_number_str = request.GET.get('last_chunk') # Get the last chunk number seen by client
-    
-    if not session_id:
-        return JsonResponse({'transcriptions': []})
-    
-    try:
-        session = RecordingSession.objects.get(id=session_id)
-        # Filter for transcriptions newer than the last one seen by the client
-        query = Transcription.objects.filter(session=session)
-        
-        if last_chunk_number_str is not None:
-            try:
-                last_chunk_number = int(last_chunk_number_str)
-                query = query.filter(chunk_number__gt=last_chunk_number)
-            except ValueError:
-                # Handle invalid last_chunk parameter if necessary, maybe return error or ignore
-                pass 
+            # Save transcription to database
+            new_transcription = Transcription.objects.create(
+                session=session,
+                text=transcription_text,
+                chunk_number=current_chunk_number,
+                language_code=language_code,
+                language_probability=language_probability,
+                words_json=words_json
+            )
+            print(f"Chunk {current_chunk_number} transcribed and saved.")
 
-        # Order by chunk number to ensure correct appending order
-        transcriptions = query.order_by('chunk_number') 
-        
-        data = [{
-            'text': t.text,
-            'chunk_number': t.chunk_number,
-            'created_at': t.created_at.strftime('%Y-%m-%d %H:%M:%S'),
-            'language_code': t.language_code,
-            'language_probability': t.language_probability,
-            'words': t.words_json,
-            'generated_insight': t.generated_insight_text # Include the insight text
-        } for t in transcriptions]
-        return JsonResponse({'transcriptions': data})
-    except RecordingSession.DoesNotExist:
-        return JsonResponse({'transcriptions': []})
+            # --- Automatic Insight Generation Logic ---
+            current_time = time.time()
+            # Only trigger summary if text exists and interval has passed
+            if transcription_text.strip() and (current_time - last_summary_time >= SUMMARY_INTERVAL):
+                 print(f"Automatic summary interval reached for session {session.id}")
+                 last_summary_time = current_time
+                 # Run summary generation in a background thread
+                 summary_thread = Thread(target=summarize_latest_transcriptions,
+                                         args=(new_transcription.id, False))
+                 summary_thread.daemon = True
+                 summary_thread.start()
+            else:
+                 print(f"Skipping automatic summary for chunk {current_chunk_number} (Interval: {current_time - last_summary_time:.1f}s)")
 
-def get_latest_insight(request):
-    session_id = request.GET.get('session_id')
-    
-    if not session_id:
-        return JsonResponse({'error': 'Session ID required'}, status=400)
-    
-    try:
-        session = RecordingSession.objects.get(id=session_id)
-        insight_data = {
-            'text': session.latest_insight_text,
-            'timestamp': session.latest_insight_timestamp.isoformat() if session.latest_insight_timestamp else None
-        }
-        return JsonResponse({'insight': insight_data})
-    except RecordingSession.DoesNotExist:
-        return JsonResponse({'error': 'Session not found'}, status=404)
+            # Return success response with basic transcription info
+            serializer = TranscriptionSerializer(new_transcription)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
 
-@csrf_exempt
-def force_insight(request):
-    global force_summary_request, is_recording
-    if request.method == 'POST' and is_recording:
-        data = json.loads(request.body)
-        session_id = data.get('session_id')
-        # Optional: verify session_id matches current_session if needed for security
-        if current_session and str(current_session.id) == session_id:
-            force_summary_request = True
-            print("Force insight request received.")
-            return JsonResponse({'status': 'summary_force_requested'})
+        except Exception as e:
+            print(f"Error processing audio chunk {current_chunk_number}: {e}")
+            # Return error response
+            return Response({'error': f'Failed to process audio chunk: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        finally:
+            # Clean up both temporary files if they exist
+            if temp_file_path and os.path.exists(temp_file_path):
+                try:
+                    os.unlink(temp_file_path)
+                    print(f"Original temporary file {temp_file_path} deleted.")
+                except Exception as unlink_error:
+                    print(f"Error deleting original temporary file {temp_file_path}: {unlink_error}")
+            if converted_file_path and os.path.exists(converted_file_path):
+                 try:
+                    os.unlink(converted_file_path)
+                    print(f"Converted temporary file {converted_file_path} deleted.")
+                 except Exception as unlink_error:
+                    print(f"Error deleting converted temporary file {converted_file_path}: {unlink_error}")
+
+    @action(detail=True, methods=['get'])
+    def latest_transcriptions(self, request, pk=None):
+        session = self.get_object()
+        # Get the latest 5 transcriptions
+        latest_transcriptions = Transcription.objects.filter(session=session).order_by('-created_at')[:5]
+        serializer = TranscriptionSerializer(latest_transcriptions, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get'])
+    def latest_insight(self, request, pk=None):
+        session = self.get_object()
+        if session.latest_insight_text and session.latest_insight_timestamp:
+            return Response({
+                'insight': session.latest_insight_text,
+                'timestamp': session.latest_insight_timestamp
+            })
         else:
-            return JsonResponse({'status': 'error', 'message': 'Session mismatch or not recording'}, status=400)
-    return JsonResponse({'status': 'error', 'message': 'Invalid request'}, status=400)
+            return Response({'insight': None, 'timestamp': None})
+
+    @action(detail=True, methods=['post'])
+    def force_insight(self, request, pk=None):
+        session = self.get_object()
+
+        # Get the last transcription for this session to use as a trigger point
+        last_transcription = Transcription.objects.filter(session=session).order_by('-created_at').first()
+
+        if not last_transcription:
+            return Response({'error': 'No transcriptions available to generate insight from'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Generate insight synchronously for API response
+        print(f"Forcing insight generation for session {session.id}")
+        insight = summarize_latest_transcriptions(last_transcription.id, is_forced=True)
+
+        if insight is not None: # Check for None specifically in case agent fails
+            return Response({'insight': insight})
+        else:
+            # Check if the session object has the latest insight text even if agent returned None here (race condition?)
+            session.refresh_from_db()
+            if session.latest_insight_text:
+                 return Response({'insight': session.latest_insight_text})
+            else:
+                 return Response({'error': 'Failed to generate insight or insight was empty'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+class TranscriptionViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = Transcription.objects.all()
+    serializer_class = TranscriptionSerializer
+
+    def get_queryset(self):
+        queryset = Transcription.objects.all()
+        # Filter by session if provided
+        session_id = self.request.query_params.get('session_id', None)
+        if session_id is not None:
+            queryset = queryset.filter(session__id=session_id)
+        return queryset.order_by('chunk_number') # Ensure chronological order

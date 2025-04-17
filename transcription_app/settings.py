@@ -49,10 +49,13 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "recorder",
+    "rest_framework",
+    "corsheaders",
 ]
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "corsheaders.middleware.CorsMiddleware",  # CORS middleware
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -147,3 +150,46 @@ ELEVENLABS_API_KEY = os.getenv('ELEVENLABS_API_KEY')
 
 # OpenAI API Key
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+
+# Django REST Framework settings
+REST_FRAMEWORK = {
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.AllowAny',
+    ],
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework.authentication.SessionAuthentication',
+        'rest_framework.authentication.BasicAuthentication',
+    ],
+    'DEFAULT_RENDERER_CLASSES': [
+        'rest_framework.renderers.JSONRenderer',
+    ],
+}
+
+# CORS settings
+CORS_ALLOW_ALL_ORIGINS = True  # Set to False in production and specify CORS_ALLOWED_ORIGINS
+# CORS_ALLOWED_ORIGINS = [
+#     "http://localhost:3000",  # Example: React frontend
+#     "https://yourdomain.com",
+# ]
+
+# If needed, specific headers and methods can be allowed
+CORS_ALLOW_METHODS = [
+    "DELETE",
+    "GET",
+    "OPTIONS",
+    "PATCH",
+    "POST",
+    "PUT",
+]
+
+CORS_ALLOW_HEADERS = [
+    "accept",
+    "accept-encoding",
+    "authorization",
+    "content-type",
+    "dnt",
+    "origin",
+    "user-agent",
+    "x-csrftoken",
+    "x-requested-with",
+]

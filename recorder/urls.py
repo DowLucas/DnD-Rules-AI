@@ -1,19 +1,21 @@
-from django.urls import path
+from django.urls import path, include
+from rest_framework.routers import DefaultRouter
 from . import views
 from django.conf import settings
 from django.conf.urls.static import static
 
 app_name = 'recorder'
 
-urlpatterns = [
-    path('', views.index, name='index'),
-    path('toggle-recording/', views.toggle_recording, name='toggle_recording'),
-    path('get-latest-transcriptions/', views.get_latest_transcriptions, name='get_latest_transcriptions'),
-    path('create-session/', views.create_session, name='create_session'),
-    path('get-latest-insight/', views.get_latest_insight, name='get_latest_insight'),
-    path('force-insight/', views.force_insight, name='force_insight'),
-]
+# Create a router and register our viewsets with it
+router = DefaultRouter()
+router.register(r'sessions', views.RecordingSessionViewSet)
+router.register(r'transcriptions', views.TranscriptionViewSet)
 
+# The API URLs are now determined automatically by the router
+urlpatterns = [
+    path('api/', include(router.urls)),
+]
+    
 # Serve static files during development
 if settings.DEBUG:
     urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT) 
