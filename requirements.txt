@@ -11,4 +11,13 @@ openai>=1.12.0
 requests
 Unidecode
 # Used for audio transcription
-pydub
+pydub==0.25.1
+
+# Document processing
+PyPDF2==3.0.1
+python-docx==1.0.1
+langchain==0.1.9
+langchain-community==0.0.29
+faiss-cpu==1.7.4
+sentence-transformers==2.5.1
+numpy==1.26.4

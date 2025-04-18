@@ -7,7 +7,7 @@ from threading import Thread
 from django.utils import timezone
 from django.conf import settings
 from django.http import JsonResponse
-from rest_framework import viewsets, status
+from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
@@ -27,8 +27,13 @@ except ImportError:
     AudioSegment = None
     ffmpeg_check = False
 
-from .models import Transcription, RecordingSession
-from .serializers import TranscriptionSerializer, RecordingSessionSerializer
+from .models import Transcription, RecordingSession, Campaign
+from .serializers import (
+    TranscriptionSerializer, 
+    RecordingSessionSerializer,
+    CampaignSerializer,
+    CampaignListSerializer
+)
 
 if not os.environ.get("OPENAI_API_KEY"):
     print("OPENAI_API_KEY is not set")
@@ -71,6 +76,24 @@ def summarize_latest_transcriptions(triggering_transcription_id, is_forced=False
     if not latest_transcriptions:
         return None
 
+    # Check for the most recent existing insight (other than "No Insight right now" responses)
+    previous_insight = None
+    # Look for insights in transcriptions first (excluding the current one)
+    transcriptions_with_insights = Transcription.objects.filter(
+        session=session_for_summary,
+        generated_insight_text__isnull=False
+    ).exclude(
+        id=triggering_transcription_id
+    ).exclude(
+        generated_insight_text="No Insight right now"
+    ).order_by('-created_at')
+    
+    if transcriptions_with_insights.exists():
+        previous_insight = transcriptions_with_insights.first().generated_insight_text
+    # If no insight found in transcriptions, check session's latest insight
+    elif session_for_summary.latest_insight_text and session_for_summary.latest_insight_text != "No Insight right now":
+        previous_insight = session_for_summary.latest_insight_text
+
     # Combine the transcriptions into a single text
     combined_text = "\n".join([
         f"Chunk {t.chunk_number}: {t.text}"
@@ -87,8 +110,14 @@ def summarize_latest_transcriptions(triggering_transcription_id, is_forced=False
             "Respond ONLY with a concise explanation or application of that rule, focusing strictly on mechanics or outcome. "
             "Do NOT mention the snippets, searching, or conversational filler. Start your response directly with the rule explanation. "
             "Conclude your response with a one-sentence summary labeled 'TL;DR:'. "
-            f"Discussion Snippets:\n\n{combined_text}"
         )
+        if previous_insight:
+            prompt += (
+                f"Previously, you identified this insight: \"{previous_insight}\"\n"
+                "If the same rule is still relevant, elaborate on it rather than repeating information. "
+                "If a completely different rule is now more relevant, focus on that instead.\n\n"
+            )
+        prompt += f"Discussion Snippets:\n\n{combined_text}"
         print("--- Forced Insight Prompt ---")
     else:
         prompt = (
@@ -98,8 +127,14 @@ def summarize_latest_transcriptions(triggering_transcription_id, is_forced=False
             "Avoid mentioning the snippets, searching, or conversational filler. "
             "If providing a rule insight, conclude your response with a one-sentence summary labeled 'TL;DR:'. "
             "If you determine that no specific rule is relevant to the discussion, respond ONLY with the exact phrase: No Insight right now "
-            f"Discussion Snippets:\n\n{combined_text}"
         )
+        if previous_insight:
+            prompt += (
+                f"Previously, you identified this insight: \"{previous_insight}\"\n"
+                "Only provide a new insight if the discussion has moved to a different rule or aspect. "
+                "If there's nothing significantly new to add, respond with 'No Insight right now'.\n\n"
+            )
+        prompt += f"Discussion Snippets:\n\n{combined_text}"
         print("--- Regular Insight Prompt ---")
 
     print(prompt)
@@ -139,17 +174,123 @@ def summarize_latest_transcriptions(triggering_transcription_id, is_forced=False
 
 
 # API Viewsets
+class CampaignViewSet(viewsets.ModelViewSet):
+    """
+    API endpoint that allows campaigns to be viewed or edited.
+    """
+    queryset = Campaign.objects.all()
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return CampaignListSerializer
+        return CampaignSerializer
+
+    def get_queryset(self):
+        """
+        This view should return a list of all the campaigns
+        for the currently authenticated user.
+        """
+        user = self.request.user
+        if user.is_authenticated:
+            return Campaign.objects.filter(user=user).prefetch_related('sessions')
+        return Campaign.objects.none()
+
+    def perform_create(self, serializer):
+        """
+        Associate the campaign with the logged-in user upon creation.
+        """
+        serializer.save(user=self.request.user)
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
+    def create_session(self, request, pk=None):
+        """
+        Creates a new RecordingSession associated with this campaign.
+        Does not require any body data, just starts a new session.
+        """
+        campaign = self.get_object()
+
+        # Ensure the user creating the session owns the campaign
+        if campaign.user != request.user:
+            return Response({'error': 'You do not have permission to add sessions to this campaign.'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        # Create a new session linked to this campaign
+        new_session = RecordingSession.objects.create(campaign=campaign, is_active=True)
+        serializer = RecordingSessionSerializer(new_session, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
+    def upload_document(self, request, pk=None):
+        """
+        Upload a document associated with this campaign.
+        
+        Expects multipart/form-data with:
+        - file: The document file
+        - title: Document title
+        - description: (optional) Document description
+        """
+        campaign = self.get_object()
+
+        # Ensure the user uploading the document owns the campaign
+        if campaign.user != request.user:
+            return Response({'error': 'You do not have permission to add documents to this campaign.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        
+        # Get required fields
+        file = request.FILES.get('file')
+        title = request.data.get('title')
+        description = request.data.get('description', '')
+        
+        if not file:
+            return Response({'error': 'Document file is required.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        
+        if not title:
+            return Response({'error': 'Document title is required.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        
+        from documents.services import DocumentService
+        
+        try:
+            # Create the document with campaign association
+            document = DocumentService.upload_document(
+                file=file,
+                title=title,
+                description=description,
+                user=request.user,
+                campaign=campaign
+            )
+            
+            from documents.serializers import DocumentSerializer
+            serializer = DocumentSerializer(document)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        
+        except Exception as e:
+            return Response({'error': f'Error uploading document: {str(e)}'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 class RecordingSessionViewSet(viewsets.ModelViewSet):
     queryset = RecordingSession.objects.all()
     serializer_class = RecordingSessionSerializer
     parser_classes = (MultiPartParser, FormParser, JSONParser)
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        """
+        Filter sessions to only show those belonging to the user's campaigns.
+        """
+        user = self.request.user
+        if user.is_authenticated:
+            return RecordingSession.objects.filter(campaign__user=user).select_related('campaign').prefetch_related('transcriptions')
+        return RecordingSession.objects.none()
 
     # Removed toggle_recording action - Recording is handled by frontend
 
     @action(detail=True, methods=['post'])
     def upload_chunk(self, request, pk=None):
         global last_summary_time # Need to update this
-        session = self.get_object()
+        session = self.get_object()  # Now filtered by user via get_queryset
 
         # Get uploaded file - assumes frontend sends it with name 'audio_chunk'
         if 'audio_chunk' not in request.FILES:
@@ -334,11 +475,28 @@ class RecordingSessionViewSet(viewsets.ModelViewSet):
 class TranscriptionViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Transcription.objects.all()
     serializer_class = TranscriptionSerializer
+    permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        queryset = Transcription.objects.all()
-        # Filter by session if provided
-        session_id = self.request.query_params.get('session_id', None)
-        if session_id is not None:
-            queryset = queryset.filter(session__id=session_id)
-        return queryset.order_by('chunk_number') # Ensure chronological order
+        """
+        Filter transcriptions to only show those belonging to sessions
+        owned by the user's campaigns.
+        Optionally filter by session ID if provided in query params.
+        """
+        user = self.request.user
+        if not user.is_authenticated:
+            return Transcription.objects.none()
+
+        queryset = Transcription.objects.filter(session__campaign__user=user).select_related('session', 'session__campaign')
+
+        # Allow filtering by session_id if provided in query params
+        session_id = self.request.query_params.get('session_id')
+        if session_id:
+            # Ensure the session actually belongs to the user before filtering
+            if RecordingSession.objects.filter(pk=session_id, campaign__user=user).exists():
+                 queryset = queryset.filter(session_id=session_id)
+            else:
+                # Prevent filtering by session_id if it doesn't belong to user
+                return Transcription.objects.none()
+
+        return queryset.order_by('-created_at')
