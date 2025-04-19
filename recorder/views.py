@@ -14,6 +14,7 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from elevenlabs import ElevenLabs
 from openai import OpenAI
 from agents import Agent, Runner, WebSearchTool, FileSearchTool
+from agents.items import ToolCallItem, ToolCallOutputItem # Import specific item types
 
 # Import pydub for audio conversion
 try:
@@ -45,16 +46,33 @@ SUMMARY_INTERVAL = 20 # Interval still relevant for automated insights
 last_summary_time = 0 # Keep track of summary timing
 
 def get_summary_agent():
+    # Get the vector store ID from .env
+    vector_store_id = os.environ.get('VECTOR_STORE_ID')
+    
+    # Create tools list, filtering out None values
+    tools = [
+        # WebSearchTool()]  # Tool for finding rules if needed, but don't cite it
+    ]
+    if vector_store_id:
+        # Add FileSearchTool with include_search_results for debugging
+        tools.append(FileSearchTool(
+            vector_store_ids=[vector_store_id],
+            include_search_results=True,
+            max_num_results=5 # Optionally limit results
+        ))
+    
     return Agent(
         name="DND Rules Assistant",
         instructions=(
-            "You are a concise D&D 5e rules assistant."
+            "You are a concise D&D 5e rules assistant. "
+            "First use the FileSearchTool to search the vector database of D&D rules when identifying relevant rules. "
+            "If you can't find what you need in the vector database, fall back to the WebSearchTool. "
+            "Provide clear, accurate rules information without citing your sources."
         ),
         model="gpt-4o-mini",
-        tools=[
-            WebSearchTool(), # Tool for finding rules if needed, but don't cite it.
-        ]
+        tools=tools
     )
+
 
 # is_forced is now only triggered by the dedicated force_insight endpoint
 def summarize_latest_transcriptions(triggering_transcription_id, is_forced=False):
@@ -107,6 +125,7 @@ def summarize_latest_transcriptions(triggering_transcription_id, is_forced=False
     if is_forced:
         prompt = (
             "Analyze the following D&D discussion snippets. Identify the MOST relevant D&D 5e rule, even if the connection is weak. "
+            "Use the FileSearchTool to search the vector database for relevant rules first. "
             "Respond ONLY with a concise explanation or application of that rule, focusing strictly on mechanics or outcome. "
             "Do NOT mention the snippets, searching, or conversational filler. Start your response directly with the rule explanation. "
             "Conclude your response with a one-sentence summary labeled 'TL;DR:'. "
@@ -123,6 +142,7 @@ def summarize_latest_transcriptions(triggering_transcription_id, is_forced=False
         prompt = (
             "Analyze the following D&D discussion snippets. Identify if any specific D&D 5e rule is being discussed, "
             "implied, or might be relevant. "
+            "Use the FileSearchTool to search the vector database for relevant rules first. "
             "If a rule is relevant, respond ONLY with a concise explanation or application of that rule, focusing strictly on mechanics or outcome. Start the response directly with the rule explanation. "
             "Avoid mentioning the snippets, searching, or conversational filler. "
             "If providing a rule insight, conclude your response with a one-sentence summary labeled 'TL;DR:'. "
@@ -146,6 +166,10 @@ def summarize_latest_transcriptions(triggering_transcription_id, is_forced=False
     try:
         # Run the agent synchronously
         result = Runner.run_sync(agent, prompt)
+
+        # Print run items for debugging
+        print_run_items(result)
+
         # Save the insight to the session
         if result.final_output and session_for_summary:
             # Save to current session for live view
@@ -471,6 +495,55 @@ class RecordingSessionViewSet(viewsets.ModelViewSet):
                  return Response({'insight': session.latest_insight_text})
             else:
                  return Response({'error': 'Failed to generate insight or insight was empty'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=False, methods=['post'])
+    def ask_rules_question(self, request):
+        """
+        Endpoint to ask manual D&D rules questions using the agent.
+        Not tied to a specific session.
+        
+        Expected POST payload:
+        {
+            "question": "What are the rules for advantage and disadvantage?"
+        }
+        """
+        # session = self.get_object() # No longer needed
+        question = request.data.get('question')
+        
+        if not question:
+            return Response({'error': 'Question is required'}, status=status.HTTP_400_BAD_REQUEST)
+            
+        # Create the summary agent
+        agent = get_summary_agent()
+        
+        # Create a prompt for the rules question
+        prompt = (
+            "You are a D&D 5e rules assistant. Answer the following question clearly and concisely. "
+            "Use the FileSearchTool to search the vector database of D&D rules first. "
+            "If you can't find what you need in the vector database, use the WebSearchTool. "
+            "Focus strictly on the rules mechanics or outcomes. "
+            "Provide a comprehensive answer but avoid unnecessary verbosity.\n\n"
+            f"Question: {question}"
+        )
+        
+        # Set up a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            # Run the agent synchronously
+            result = Runner.run_sync(agent, prompt)
+            
+            if result.final_output:
+                return Response({'answer': result.final_output})
+            else:
+                return Response({'error': 'Failed to generate an answer'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception as e:
+            print(f"Error running agent for rules question: {e}")
+            return Response({'error': f'Failed to answer question: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        finally:
+            # Clean up the loop
+            loop.close()
 
 class TranscriptionViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Transcription.objects.all()

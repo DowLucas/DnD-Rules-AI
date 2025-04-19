@@ -27,6 +27,7 @@ class Document(models.Model):
     title = models.CharField(max_length=255)
     description = models.TextField(blank=True, null=True)
     file = models.FileField(upload_to=document_upload_path)
+    openai_file_id = models.CharField(max_length=255, blank=True, null=True, unique=True, help_text="OpenAI File ID")
     file_type = models.CharField(max_length=10)  # pdf, docx, txt, etc.
     file_size = models.PositiveIntegerField(default=0)  # Size in bytes
     uploaded_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='documents')

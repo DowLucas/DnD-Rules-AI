@@ -179,3 +179,17 @@ Forces the generation of a new D&D rule insight based on recent transcriptions f
   "insight": "Rule explanation text"
 }
 ```
+
+### Ask Rules Question
+
+```
+POST /api/sessions/ask_rules_question/
+```
+
+Asks a specific D&D rules question and gets an answer using the AI assistant. This endpoint uses the vector database to search for relevant rules first.
+
+**Request Body**:
+
+```
+
+```
