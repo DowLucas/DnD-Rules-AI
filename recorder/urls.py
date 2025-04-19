@@ -5,6 +5,7 @@ from .auth_views import RegisterView, LoginView, LogoutView, UserDetailsView
 from documents.views import DocumentViewSet
 from django.conf import settings
 from django.conf.urls.static import static
+from .views import spotify_token, spotify_refresh
 
 app_name = 'recorder'
 
@@ -25,8 +26,12 @@ auth_urls = [
 
 # The API URLs are now determined automatically by the router
 urlpatterns = [
-    path('api/', include(router.urls)),
-    path('api/', include(auth_urls)),
+    path('', include(router.urls)),
+    path('', include(auth_urls)),
+    
+    # Spotify API endpoints
+    path('spotify/token', spotify_token, name='spotify_token'),
+    path('spotify/refresh', spotify_refresh, name='spotify_refresh'),
 ]
     
 # Serve static files during development

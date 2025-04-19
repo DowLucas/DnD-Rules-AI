@@ -22,7 +22,8 @@ from django.conf.urls.static import static
 
 urlpatterns = [
     path('admin/', admin.site.urls),
-    path('', include('recorder.urls')),
+    # Include recorder urls under the /api/ prefix
+    path('api/', include('recorder.urls')),
     path('api-auth/', include('rest_framework.urls')),
     # Redirect root to API
     path('', RedirectView.as_view(url='api/', permanent=False)),

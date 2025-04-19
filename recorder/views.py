@@ -8,13 +8,14 @@ from django.utils import timezone
 from django.conf import settings
 from django.http import JsonResponse
 from rest_framework import viewsets, status, permissions
-from rest_framework.decorators import action
+from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from elevenlabs import ElevenLabs
 from openai import OpenAI
 from agents import Agent, Runner, WebSearchTool, FileSearchTool
 from agents.items import ToolCallItem, ToolCallOutputItem # Import specific item types
+import requests
 
 # Import pydub for audio conversion
 try:
@@ -573,3 +574,80 @@ class TranscriptionViewSet(viewsets.ReadOnlyModelViewSet):
                 return Transcription.objects.none()
 
         return queryset.order_by('-created_at')
+
+# Spotify API integration
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def spotify_token(request):
+    """Exchange authorization code for access token"""
+    code = request.data.get('code')
+    
+    if not code:
+        return Response({'error': 'Authorization code is required'}, status=status.HTTP_400_BAD_REQUEST)
+    
+    # Get Spotify credentials from environment variables
+    client_id = os.environ.get('SPOTIFY_CLIENT_ID')
+    client_secret = os.environ.get('SPOTIFY_CLIENT_SECRET')
+    redirect_uri = os.environ.get('SPOTIFY_REDIRECT_URI')
+    
+    if not client_id or not client_secret:
+        return Response({'error': 'Spotify API credentials not configured'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    # Exchange code for token
+    token_url = 'https://accounts.spotify.com/api/token'
+    payload = {
+        'grant_type': 'authorization_code',
+        'code': code,
+        'redirect_uri': redirect_uri,
+    }
+    
+    # Make request to Spotify API
+    response = requests.post(
+        token_url,
+        data=payload,
+        auth=(client_id, client_secret)
+    )
+    
+    if response.status_code != 200:
+        return Response({'error': 'Failed to exchange code for token', 'details': response.json()}, 
+                        status=status.HTTP_400_BAD_REQUEST)
+    
+    # Return the access token and related data
+    return Response(response.json())
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def spotify_refresh(request):
+    """Refresh Spotify access token"""
+    refresh_token = request.data.get('refresh_token')
+    
+    if not refresh_token:
+        return Response({'error': 'Refresh token is required'}, status=status.HTTP_400_BAD_REQUEST)
+    
+    # Get Spotify credentials from environment variables
+    client_id = os.environ.get('SPOTIFY_CLIENT_ID')
+    client_secret = os.environ.get('SPOTIFY_CLIENT_SECRET')
+    
+    if not client_id or not client_secret:
+        return Response({'error': 'Spotify API credentials not configured'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    # Exchange refresh token for new access token
+    token_url = 'https://accounts.spotify.com/api/token'
+    payload = {
+        'grant_type': 'refresh_token',
+        'refresh_token': refresh_token,
+    }
+    
+    # Make request to Spotify API
+    response = requests.post(
+        token_url,
+        data=payload,
+        auth=(client_id, client_secret)
+    )
+    
+    if response.status_code != 200:
+        return Response({'error': 'Failed to refresh token', 'details': response.json()}, 
+                        status=status.HTTP_400_BAD_REQUEST)
+    
+    # Return the new access token and related data
+    return Response(response.json())

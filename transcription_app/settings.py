@@ -36,7 +36,7 @@ if TRANSCRIPTION_MODEL not in ['elevenlabs', 'openai']:
     print(f"Warning: Invalid TRANSCRIPTION_MODEL '{TRANSCRIPTION_MODEL}'. Defaulting to 'elevenlabs'.")
     TRANSCRIPTION_MODEL = 'elevenlabs'
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['dnd-ai.serveo.net', "localhost"]
 
 
 # Application definition
