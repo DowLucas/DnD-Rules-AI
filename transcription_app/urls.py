@@ -24,6 +24,8 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     # Include recorder urls under the /api/ prefix
     path('api/', include('recorder.urls')),
+    # Include documents urls
+    path('api/documents/', include('documents.urls')),
     path('api-auth/', include('rest_framework.urls')),
     # Redirect root to API
     path('', RedirectView.as_view(url='api/', permanent=False)),

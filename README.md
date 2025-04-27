@@ -67,3 +67,59 @@ The application provides a RESTful API. See the [API Documentation](API.md) for 
 - Django & Django REST Framework
 - ElevenLabs API key and/or OpenAI API key
 - Appropriate system libraries for transcription dependencies (if any beyond Python packages).
+
+## ChromaDB Vector Store
+
+This application uses ChromaDB for document storage, retrieval, and semantic search capabilities. The vector store is used by the D&D rules assistant agent to find relevant information when answering questions.
+
+### Document Processing
+
+When a document is uploaded:
+
+1. The text is extracted from the file (PDF, DOCX, TXT, or Markdown)
+2. The text is split into chunks with a small overlap for context
+3. The chunks are stored in the database and in the ChromaDB vector store
+4. OpenAI embeddings are used to create vector representations of the text
+
+### Search
+
+The vector store enables semantic search, allowing users to find information based on meaning rather than just keywords. For example, a search for "How does advantage work?" will find relevant content about advantage mechanics even if the exact words aren't used.
+
+### Admin Functions
+
+Administrators can:
+
+- Reindex all documents if needed (useful after embedding model changes)
+- Manage all documents in the system
+
+### Using Custom Tools with OpenAI Agents
+
+The application uses the OpenAI Agents SDK with custom function tools to access the ChromaDB vector store. This provides better control and performance compared to using the built-in FileSearchTool.
+
+Example agent setup with custom tools:
+
+```python
+from agents import Agent, Runner
+from documents.tools import get_agent_tools
+
+def get_dnd_agent():
+    # Get custom tools
+    tools = get_agent_tools()
+
+    # Create agent with tools
+    agent = Agent(
+        name="DND Rules Assistant",
+        instructions="You are a helpful D&D rules assistant...",
+        model="gpt-4o",
+        tools=tools
+    )
+
+    return agent
+```
+
+### Environment Variables
+
+To use the vector store, set the following environment variables:
+
+- `OPENAI_API_KEY`: Your OpenAI API key
+- `CHROMA_COLLECTION_NAME`: (Optional) Name for the ChromaDB collection (default: "dnd_rules")

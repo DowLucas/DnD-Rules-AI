@@ -92,3 +92,19 @@ class Transcription(models.Model):
                 text_parts.append(word['text'])
         
         return ' '.join(text_parts)
+
+
+class NPC(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    campaign = models.ForeignKey(Campaign, on_delete=models.CASCADE, related_name='npcs')
+    name = models.CharField(max_length=255)
+    description = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name']
+        unique_together = ['campaign', 'name']
+
+    def __str__(self):
+        return f"{self.name} ({self.campaign.name})"

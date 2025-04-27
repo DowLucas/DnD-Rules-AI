@@ -2,7 +2,8 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from . import views
 from .auth_views import RegisterView, LoginView, LogoutView, UserDetailsView
-from documents.views import DocumentViewSet
+# Remove this import as we're not using it anymore
+# from documents.views import DocumentViewSet
 from django.conf import settings
 from django.conf.urls.static import static
 from .views import spotify_token, spotify_refresh
@@ -14,7 +15,8 @@ router = DefaultRouter()
 router.register(r'campaigns', views.CampaignViewSet)
 router.register(r'sessions', views.RecordingSessionViewSet)
 router.register(r'transcriptions', views.TranscriptionViewSet)
-router.register(r'documents', DocumentViewSet)
+# Remove the documents registration to avoid URL conflicts
+# router.register(r'documents', DocumentViewSet)
 
 # Authentication URLs
 auth_urls = [

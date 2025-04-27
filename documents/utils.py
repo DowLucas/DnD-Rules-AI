@@ -29,26 +29,29 @@ def get_embedding_model():
         EMBEDDING_MODEL = SentenceTransformer('all-MiniLM-L6-v2')
     return EMBEDDING_MODEL
 
-def extract_text(file_path, file_type):
+def extract_text(file_path):
     """
-    Extract text from various document types
+    Extract text from various document types based on file extension
     
     Args:
         file_path (str): Path to the document
-        file_type (str): Type of document (pdf, docx, txt)
         
     Returns:
         str: Extracted text
     """
     try:
-        if file_type == 'pdf':
+        file_ext = os.path.splitext(file_path)[1].lower()
+        
+        if file_ext == '.pdf':
             return extract_text_from_pdf(file_path)
-        elif file_type == 'docx':
+        elif file_ext == '.docx':
             return extract_text_from_docx(file_path)
-        elif file_type == 'txt':
+        elif file_ext == '.txt':
             return extract_text_from_txt(file_path)
+        elif file_ext == '.md':
+            return extract_text_from_markdown(file_path)
         else:
-            raise ValueError(f"Unsupported file type: {file_type}")
+            raise ValueError(f"Unsupported file type: {file_ext}")
     except Exception as e:
         logger.error(f"Error extracting text from {file_path}: {str(e)}")
         raise
@@ -72,6 +75,11 @@ def extract_text_from_docx(file_path):
 
 def extract_text_from_txt(file_path):
     """Extract text from plain text file"""
+    with open(file_path, 'r', encoding='utf-8') as file:
+        return file.read()
+
+def extract_text_from_markdown(file_path):
+    """Extract text from Markdown file"""
     with open(file_path, 'r', encoding='utf-8') as file:
         return file.read()
 

@@ -13,9 +13,12 @@ from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from elevenlabs import ElevenLabs
 from openai import OpenAI
-from agents import Agent, Runner, WebSearchTool, FileSearchTool
+from agents import Agent, Runner, WebSearchTool
 from agents.items import ToolCallItem, ToolCallOutputItem # Import specific item types
 import requests
+
+# Import documents tools instead of FileSearchTool
+from documents.tools import get_agent_tools
 
 # Import pydub for audio conversion
 try:
@@ -29,12 +32,21 @@ except ImportError:
     AudioSegment = None
     ffmpeg_check = False
 
-from .models import Transcription, RecordingSession, Campaign
+# Import our custom prompts
+from prompts import (
+    get_agent_instructions,
+    get_regular_insight_prompt,
+    get_forced_insight_prompt,
+    get_rules_question_prompt
+)
+
+from .models import Transcription, RecordingSession, Campaign, NPC
 from .serializers import (
     TranscriptionSerializer, 
     RecordingSessionSerializer,
     CampaignSerializer,
-    CampaignListSerializer
+    CampaignListSerializer,
+    NPCSerializer
 )
 
 if not os.environ.get("OPENAI_API_KEY"):
@@ -47,33 +59,53 @@ SUMMARY_INTERVAL = 20 # Interval still relevant for automated insights
 last_summary_time = 0 # Keep track of summary timing
 
 def get_summary_agent():
-    # Get the vector store ID from .env
-    vector_store_id = os.environ.get('VECTOR_STORE_ID')
+    # Get custom tools from documents app
+    custom_tool_definitions = get_agent_tools()
     
-    # Create tools list, filtering out None values
+    # Add WebSearchTool if needed (commented out by default)
     tools = [
-        # WebSearchTool()]  # Tool for finding rules if needed, but don't cite it
+        # WebSearchTool(),  # Tool for finding rules if needed, but don't cite it
     ]
-    if vector_store_id:
-        # Add FileSearchTool with include_search_results for debugging
-        tools.append(FileSearchTool(
-            vector_store_ids=[vector_store_id],
-            include_search_results=True,
-            max_num_results=5 # Optionally limit results
-        ))
+    
+    # Extract tools from the definitions and register them with their schemas
+    tool_configs = []
+    for tool_def in custom_tool_definitions:
+        # Register the tool schema
+        tool_configs.append({
+            "type": "function",
+            "function": tool_def["schema"]
+        })
+        
+        # Add the function implementation
+        tools.append(tool_def["function"])
     
     return Agent(
         name="DND Rules Assistant",
-        instructions=(
-            "You are a concise D&D 5e rules assistant. "
-            "First use the FileSearchTool to search the vector database of D&D rules when identifying relevant rules. "
-            "If you can't find what you need in the vector database, fall back to the WebSearchTool. "
-            "Provide clear, accurate rules information without citing your sources."
-        ),
+        instructions=get_agent_instructions(),
         model="gpt-4o-mini",
-        tools=tools
+        tools=tools,
+        tool_configs=tool_configs
     )
 
+
+# Helper function to print run items for debugging
+def print_run_items(result):
+    """Print run items for debugging purposes."""
+    if not result or not hasattr(result, 'run_items'):
+        print("No run items to display")
+        return
+        
+    print("\n----- Run Items -----")
+    for i, item in enumerate(result.run_items):
+        if isinstance(item, ToolCallItem):
+            print(f"{i}: TOOL CALL - {item.name}")
+            print(f"    Input: {item.input}")
+        elif isinstance(item, ToolCallOutputItem):
+            print(f"{i}: TOOL OUTPUT - {item.name}")
+            print(f"    Output: {item.output[:100]}..." if len(str(item.output)) > 100 else f"    Output: {item.output}")
+        else:
+            print(f"{i}: {type(item).__name__}")
+    print("---------------------\n")
 
 # is_forced is now only triggered by the dedicated force_insight endpoint
 def summarize_latest_transcriptions(triggering_transcription_id, is_forced=False):
@@ -124,38 +156,10 @@ def summarize_latest_transcriptions(triggering_transcription_id, is_forced=False
 
     # Choose prompt based on whether it was forced
     if is_forced:
-        prompt = (
-            "Analyze the following D&D discussion snippets. Identify the MOST relevant D&D 5e rule, even if the connection is weak. "
-            "Use the FileSearchTool to search the vector database for relevant rules first. "
-            "Respond ONLY with a concise explanation or application of that rule, focusing strictly on mechanics or outcome. "
-            "Do NOT mention the snippets, searching, or conversational filler. Start your response directly with the rule explanation. "
-            "Conclude your response with a one-sentence summary labeled 'TL;DR:'. "
-        )
-        if previous_insight:
-            prompt += (
-                f"Previously, you identified this insight: \"{previous_insight}\"\n"
-                "If the same rule is still relevant, elaborate on it rather than repeating information. "
-                "If a completely different rule is now more relevant, focus on that instead.\n\n"
-            )
-        prompt += f"Discussion Snippets:\n\n{combined_text}"
+        prompt = get_forced_insight_prompt(combined_text, previous_insight)
         print("--- Forced Insight Prompt ---")
     else:
-        prompt = (
-            "Analyze the following D&D discussion snippets. Identify if any specific D&D 5e rule is being discussed, "
-            "implied, or might be relevant. "
-            "Use the FileSearchTool to search the vector database for relevant rules first. "
-            "If a rule is relevant, respond ONLY with a concise explanation or application of that rule, focusing strictly on mechanics or outcome. Start the response directly with the rule explanation. "
-            "Avoid mentioning the snippets, searching, or conversational filler. "
-            "If providing a rule insight, conclude your response with a one-sentence summary labeled 'TL;DR:'. "
-            "If you determine that no specific rule is relevant to the discussion, respond ONLY with the exact phrase: No Insight right now "
-        )
-        if previous_insight:
-            prompt += (
-                f"Previously, you identified this insight: \"{previous_insight}\"\n"
-                "Only provide a new insight if the discussion has moved to a different rule or aspect. "
-                "If there's nothing significantly new to add, respond with 'No Insight right now'.\n\n"
-            )
-        prompt += f"Discussion Snippets:\n\n{combined_text}"
+        prompt = get_regular_insight_prompt(combined_text, previous_insight)
         print("--- Regular Insight Prompt ---")
 
     print(prompt)
@@ -295,6 +299,66 @@ class CampaignViewSet(viewsets.ModelViewSet):
             return Response({'error': f'Error uploading document: {str(e)}'},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+    @action(detail=True, methods=['get'], permission_classes=[permissions.IsAuthenticated])
+    def npcs(self, request, pk=None):
+        """
+        Get all NPCs associated with this campaign.
+        """
+        campaign = self.get_object()
+
+        # Ensure the user has permission to access the campaign
+        if campaign.user != request.user:
+            return Response({'error': 'You do not have permission to access this campaign.'},
+                           status=status.HTTP_403_FORBIDDEN)
+
+        npcs = NPC.objects.filter(campaign=campaign)
+        serializer = NPCSerializer(npcs, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
+    def create_npc(self, request, pk=None):
+        """
+        Creates a new NPC associated with this campaign.
+        
+        Expects JSON data with:
+        - name: NPC name (required)
+        - description: NPC description (optional)
+        """
+        campaign = self.get_object()
+
+        # Ensure the user creating the NPC owns the campaign
+        if campaign.user != request.user:
+            return Response({'error': 'You do not have permission to add NPCs to this campaign.'},
+                           status=status.HTTP_403_FORBIDDEN)
+
+        # Validate required fields
+        name = request.data.get('name')
+        if not name:
+            return Response({'error': 'NPC name is required.'},
+                           status=status.HTTP_400_BAD_REQUEST)
+
+        description = request.data.get('description', '')
+
+        try:
+            # Check if NPC with same name already exists in this campaign
+            if NPC.objects.filter(campaign=campaign, name=name).exists():
+                return Response({'error': f'NPC with name "{name}" already exists in this campaign.'},
+                               status=status.HTTP_400_BAD_REQUEST)
+                
+            # Create the NPC
+            npc = NPC.objects.create(
+                campaign=campaign,
+                name=name,
+                description=description
+            )
+            
+            serializer = NPCSerializer(npc)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+            
+        except Exception as e:
+            return Response({'error': f'Error creating NPC: {str(e)}'},
+                           status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 class RecordingSessionViewSet(viewsets.ModelViewSet):
     queryset = RecordingSession.objects.all()
     serializer_class = RecordingSessionSerializer
@@ -304,11 +368,20 @@ class RecordingSessionViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         """
         Filter sessions to only show those belonging to the user's campaigns.
+        Optionally filter by campaign_id or campaign if provided in query params.
         """
         user = self.request.user
-        if user.is_authenticated:
-            return RecordingSession.objects.filter(campaign__user=user).select_related('campaign').prefetch_related('transcriptions')
-        return RecordingSession.objects.none()
+        if not user.is_authenticated:
+            return RecordingSession.objects.none()
+        
+        queryset = RecordingSession.objects.filter(campaign__user=user).select_related('campaign').prefetch_related('transcriptions')
+        
+        # Check for both campaign_id and campaign parameters for backward compatibility
+        campaign_id = self.request.query_params.get('campaign_id', None) or self.request.query_params.get('campaign', None)
+        if campaign_id:
+            queryset = queryset.filter(campaign_id=campaign_id)
+            
+        return queryset
 
     # Removed toggle_recording action - Recording is handled by frontend
 
@@ -508,7 +581,6 @@ class RecordingSessionViewSet(viewsets.ModelViewSet):
             "question": "What are the rules for advantage and disadvantage?"
         }
         """
-        # session = self.get_object() # No longer needed
         question = request.data.get('question')
         
         if not question:
@@ -517,15 +589,8 @@ class RecordingSessionViewSet(viewsets.ModelViewSet):
         # Create the summary agent
         agent = get_summary_agent()
         
-        # Create a prompt for the rules question
-        prompt = (
-            "You are a D&D 5e rules assistant. Answer the following question clearly and concisely. "
-            "Use the FileSearchTool to search the vector database of D&D rules first. "
-            "If you can't find what you need in the vector database, use the WebSearchTool. "
-            "Focus strictly on the rules mechanics or outcomes. "
-            "Provide a comprehensive answer but avoid unnecessary verbosity.\n\n"
-            f"Question: {question}"
-        )
+        # Create a prompt for the rules question using the prompt module
+        prompt = get_rules_question_prompt(question)
         
         # Set up a new event loop for this thread
         loop = asyncio.new_event_loop()
@@ -534,6 +599,8 @@ class RecordingSessionViewSet(viewsets.ModelViewSet):
         try:
             # Run the agent synchronously
             result = Runner.run_sync(agent, prompt)
+            
+            print(result.raw_responses)
             
             if result.final_output:
                 return Response({'answer': result.final_output})

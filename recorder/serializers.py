@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import RecordingSession, Transcription, Campaign
+from .models import RecordingSession, Transcription, Campaign, NPC
 
 class TranscriptionSerializer(serializers.ModelSerializer):
     class Meta:
@@ -65,4 +65,12 @@ class CampaignListSerializer(serializers.ModelSerializer):
         return obj.sessions.count()
         
     def get_document_count(self, obj):
-        return obj.documents.count() 
+        return obj.documents.count()
+
+class NPCSerializer(serializers.ModelSerializer):
+    campaign = serializers.PrimaryKeyRelatedField(read_only=True)
+
+    class Meta:
+        model = NPC
+        fields = ['id', 'campaign', 'name', 'description', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'campaign'] 
